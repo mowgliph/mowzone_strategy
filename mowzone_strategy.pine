@@ -1,0 +1,271 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © mowdev
+
+//@version=6
+strategy("MowZone Strategy v6", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// ==============================================================================
+// INPUTS Y PARÁMETROS GENERALES
+// ==============================================================================
+
+// ----- Configuración de Backtesting ----- 
+G_Backtest = "Backtesting"
+backtest_from = input.time(timestamp("2020-01-01T00:00:00"), title="Backtest Start Date", group=G_Backtest)
+backtest_to   = input.time(timestamp("2030-01-01T00:00:00"), title="Backtest End Date", group=G_Backtest)
+inBacktestPeriod = (time >= backtest_from) and (time <= backtest_to)
+
+// ----- Configuración de Supertrend -----
+G_Sup = "Settings of Supertrend"
+Periods       = input.int(title="Supertrend 1 ATR Period", defval=14, group=G_Sup)
+src           = input.source(hl2, title="Source", group=G_Sup)
+showsignals   = input.bool(title="Show Buy/Sell Signals?", defval=true, group=G_Sup)
+Multiplier    = input.float(title="ATR Multiplier", defval=1.8, group=G_Sup)
+changeATR     = input.bool(title="Change ATR Calculation Method?", defval=true, group=G_Sup)
+
+// ----- Configuración de Profit Target y Stop Loss -----
+G_ATR = "Settings of Profit and Loss"
+showSLTPLines           = input.bool(title="Show Stop Loss & Take Profit Lines?", defval=true, group=G_ATR)
+Periods3                = input.int(title="Profit Target ATR Period", defval=14, group=G_ATR)
+Periods4                = input.int(title="Stop Loss ATR Period", defval=14, group=G_ATR)
+profitTargetMultiplier  = input.float(title="Profit Target Multiplier", defval=1.5, group=G_ATR)
+stopLossMultiplier      = input.float(title="Stop Loss Multiplier", defval=1.5, group=G_ATR)
+
+// ----- Configuración de ASH (Absolute Strength Histogram) -----
+G_ASH = "Settings of ASH"
+Length   = input.int(16, title="Period of Evaluation", group=G_ASH)
+Smooth   = input.int(4, title="Period of Smoothing", group=G_ASH)
+src_ash  = input.source(close, title="Source", group=G_ASH)
+Mode     = input.string(title="Indicator Method", defval="RSI", options=["RSI", "STOCHASTIC", "ADX"], group=G_ASH)
+ma_type  = input.string(title="MA", defval="EMA", options=["ALMA", "EMA", "WMA", "SMA", "SMMA", "HMA"], group=G_ASH)
+alma_offset = input.float(defval=0.85, title="* ALMA Only - Offset Value", minval=0, step=0.01, group=G_ASH)
+alma_sigma  = input.int(defval=6, title="* ALMA Only - Sigma Value", minval=0, group=G_ASH)
+
+// ==============================================================================
+// DECLARACIÓN DE VARIABLES GLOBALES PARA NIVELES DE TP Y SL
+// ==============================================================================
+var float long_tp_level  = na
+var float long_sl_level  = na
+var float short_tp_level = na
+var float short_sl_level = na
+
+// ==============================================================================
+// FUNCIONES
+// ==============================================================================
+
+// Función de media móvil (admite varios tipos)
+ma(_type, _src, _len) =>
+    result = switch _type
+        "SMA"   => ta.sma(_src, _len)
+        "EMA"   => ta.ema(_src, _len)
+        "WMA"   => ta.wma(_src, _len)
+        "SMMA"  =>
+            w = ta.wma(_src, _len)
+            x = ta.sma(_src, _len)
+            na(w[1]) ? x : (w[1] * (_len - 1) + _src) / _len
+        "HMA"   => ta.wma(2 * ta.wma(_src, _len / 2) - ta.wma(_src, _len), math.round(math.sqrt(_len)))
+        "ALMA"  => ta.alma(_src, _len, alma_offset, alma_sigma)
+    result
+
+// Función Supertrend
+supertrend(_src, _factor, _length, _changeATR) =>
+    atr_standard = ta.atr(_length)
+    atr_sma = ta.sma(atr_standard, _length)
+    atr = _changeATR ? atr_standard : atr_sma
+    up = _src - (_factor * atr)
+    up_prev = nz(up[1], up)
+    up := close[1] > up_prev ? math.max(up, up_prev) : up
+    dn = _src + (_factor * atr)
+    dn_prev = nz(dn[1], dn)
+    dn := close[1] < dn_prev ? math.min(dn, dn_prev) : dn
+    trend = 1
+    trend := nz(trend[1], trend)
+    trend := (trend == -1 and close > dn_prev) ? 1 : (trend == 1 and close < up_prev) ? -1 : trend
+    [up, dn, trend]
+
+// ==============================================================================
+// CÁLCULOS DE INDICADORES
+// ==============================================================================
+
+// --- Supertrend ---
+[up1, dn1, supertrend1] = supertrend(src, Multiplier, Periods, changeATR)
+
+// --- ATR para Profit Target y Stop Loss ---
+Profit_ATR = ta.atr(Periods3)
+Stop_ATR   = ta.atr(Periods4)
+
+// --- ASH (Absolute Strength Histogram) ---
+Price  = src
+Price1 = ma("SMA", Price, 1)
+Price2 = ma("SMA", Price[1], 1)
+
+// Método RSI
+Bulls0 = 0.5 * (math.abs(Price1 - Price2) + (Price1 - Price2))
+Bears0 = 0.5 * (math.abs(Price1 - Price2) - (Price1 - Price2))
+// Método STOCHASTIC
+Bulls1 = Price1 - ta.lowest(Price1, Length)
+Bears1 = ta.highest(Price1, Length) - Price1
+// Método ADX
+Bulls2 = 0.5 * (math.abs(high - high[1]) + (high - high[1]))
+Bears2 = 0.5 * (math.abs(low[1] - low) + (low[1] - low))
+
+Bulls = Mode == "RSI" ? Bulls0 : Mode == "STOCHASTIC" ? Bulls1 : Bulls2
+Bears = Mode == "RSI" ? Bears0 : Mode == "STOCHASTIC" ? Bears1 : Bears2
+
+AvgBulls  = ma(ma_type, Bulls, Length)
+AvgBears  = ma(ma_type, Bears, Length)
+SmthBulls = ma(ma_type, AvgBulls, Smooth)
+SmthBears = ma(ma_type, AvgBears, Smooth)
+difference = math.abs(SmthBulls - SmthBears)
+
+bull_trend_color = (SmthBulls < SmthBulls[1]) ? color.lime : color.green
+bear_trend_color = (SmthBears < SmthBears[1]) ? color.orange : color.red
+
+difference_color = difference > SmthBulls ? ((SmthBears < SmthBears[1]) ? color.orange : color.red) :
+                   difference > SmthBears ? ((SmthBulls < SmthBulls[1]) ? color.lime : color.green) : color.gray
+
+// ==============================================================================
+// VARIABLES GLOBALES PARA RESULTADOS DE CRUCES
+// ==============================================================================
+
+// Cruces para entradas:
+var bool cross_close_dn1 = false
+var bool cross_close_up1  = false
+cross_close_dn1 := ta.crossover(close, dn1)
+cross_close_up1 := ta.crossunder(close, up1)
+
+// Cruces para salidas (TP y SL) – se usan sólo cuando los niveles ya han sido asignados:
+var bool cross_long_tp  = false
+var bool cross_long_sl  = false
+var bool cross_short_tp = false
+var bool cross_short_sl = false
+
+// Declarar variables globales para cada condición de cruce con niveles TP/SL
+var bool globalCrossoverLongTP   = false
+var bool globalCrossunderLongSL   = false
+var bool globalCrossunderShortTP  = false
+var bool globalCrossoverShortSL   = false
+
+// En cada barra, actualizar las variables con el resultado de las funciones de cruce
+globalCrossoverLongTP  := ta.crossover(close, long_tp_level)
+globalCrossunderLongSL := ta.crossunder(close, long_sl_level)
+globalCrossunderShortTP := ta.crossunder(close, short_tp_level)
+globalCrossoverShortSL := ta.crossover(close, short_sl_level)
+
+// Asignar los cruces a las variables de salida, comprobando además que los niveles no sean 'na'
+cross_long_tp  := not na(long_tp_level)  and globalCrossoverLongTP
+cross_long_sl  := not na(long_sl_level)  and globalCrossunderLongSL
+cross_short_tp := not na(short_tp_level) and globalCrossunderShortTP
+cross_short_sl := not na(short_sl_level) and globalCrossoverShortSL
+
+// ==============================================================================
+// LÓGICA DE ENTRADA Y SALIDA DE OPERACIONES
+// ==============================================================================
+
+// EXTRAER LAS LLAMADAS A ta.barssince() A VARIABLES GLOBALES
+var int barsSinceCrossCloseDn1 = 0
+var int barsSinceCrossCloseUp1 = 0
+
+// Actualizamos en cada barra
+barsSinceCrossCloseDn1 := ta.barssince(cross_close_dn1)
+barsSinceCrossCloseUp1 := ta.barssince(cross_close_up1)
+
+// DECLARAR VARIABLES GLOBALES PARA ENTRADAS
+var bool long_entry  = false
+var bool short_entry = false
+
+if inBacktestPeriod
+    // Condición de entrada LONG: usamos la variable global barsSinceCrossCloseDn1
+    long_entry := (barsSinceCrossCloseDn1 <= 1 and close > dn1) and (difference_color == bull_trend_color) and barstate.isconfirmed
+    if long_entry
+        long_tp_level := close + (Profit_ATR * profitTargetMultiplier)
+        long_sl_level := close - (Stop_ATR * stopLossMultiplier)
+        strategy.entry("Long", strategy.long, comment="Long Entry")
+        strategy.exit("Long Exit", from_entry="Long", stop=long_sl_level, limit=long_tp_level)
+    
+    // Condición de entrada SHORT: usamos la variable global barsSinceCrossCloseUp1
+    short_entry := (barsSinceCrossCloseUp1 <= 1 and close < up1) and (difference_color == bear_trend_color) and barstate.isconfirmed
+    if short_entry
+        short_tp_level := close - (Profit_ATR * profitTargetMultiplier)
+        short_sl_level := close + (Stop_ATR * stopLossMultiplier)
+        strategy.entry("Short", strategy.short, comment="Short Entry")
+        strategy.exit("Short Exit", from_entry="Short", stop=short_sl_level, limit=short_tp_level)
+
+// Opcional: se pueden forzar cierres si se detecta el cruce de TP o SL (aunque las órdenes exit ya se programaron)
+long_exit = strategy.position_size > 0 and (cross_long_tp or cross_long_sl)
+short_exit = strategy.position_size < 0 and (cross_short_tp or cross_short_sl)
+
+if long_exit
+    strategy.close("Long", comment="Long Exit")
+if short_exit
+    strategy.close("Short", comment="Short Exit")
+
+// ==============================================================================
+// PLOTEOS Y ALERTAS
+// ==============================================================================
+
+// Plotear líneas del Supertrend
+plot(supertrend1 == 1 ? up1 : na, title="Up Trend", style=plot.style_linebr, linewidth=2, color=color.green)
+plot(supertrend1 == -1 ? dn1 : na, title="Down Trend", style=plot.style_linebr, linewidth=2, color=color.red)
+
+// Señales visuales en el gráfico
+plotshape(long_entry and showsignals ? close : na, title="Buy", text="Buy", location=location.belowbar, style=shape.labelup, size=size.tiny, color=color.green, textcolor=color.white)
+plotshape(short_entry and showsignals ? close : na, title="Sell", text="Sell", location=location.abovebar, style=shape.labeldown, size=size.tiny, color=color.red, textcolor=color.white)
+
+// Señales de salida (TP / SL)
+plotshape(long_exit and showsignals and cross_long_tp ? close : na, title="Long TP", text="TP", location=location.abovebar, style=shape.circle, size=size.tiny, color=color.green, textcolor=color.white)
+plotshape(long_exit and showsignals and cross_long_sl ? close : na, title="Long SL", text="SL", location=location.abovebar, style=shape.xcross, size=size.tiny, color=color.red, textcolor=color.white)
+plotshape(short_exit and showsignals and cross_short_tp ? close : na, title="Short TP", text="TP", location=location.belowbar, style=shape.circle, size=size.tiny, color=color.red, textcolor=color.white)
+plotshape(short_exit and showsignals and cross_short_sl ? close : na, title="Short SL", text="SL", location=location.belowbar, style=shape.xcross, size=size.tiny, color=color.green, textcolor=color.white)
+
+// Plotear niveles de TP y SL (si se han asignado y están activados)
+plot(showSLTPLines and strategy.position_size > 0 ? long_sl_level : na, title="Long Stop Loss", style=plot.style_linebr, linewidth=1, color=color.red)
+plot(showSLTPLines and strategy.position_size > 0 ? long_tp_level : na, title="Long Take Profit", style=plot.style_linebr, linewidth=1, color=color.green)
+plot(showSLTPLines and strategy.position_size < 0 ? short_sl_level : na, title="Short Stop Loss", style=plot.style_linebr, linewidth=1, color=color.red)
+plot(showSLTPLines and strategy.position_size < 0 ? short_tp_level : na, title="Short Take Profit", style=plot.style_linebr, linewidth=1, color=color.green)
+
+
+// ==============================================================================
+// TABLA DE ESTADÍSTICAS DE TRADING (Opcional)
+// ==============================================================================
+
+// Variables globales para almacenar las estadísticas
+var int total_wins   = 0
+var int total_losses = 0
+var float running_profit = 0.0
+var float running_loss   = 0.0
+
+// Actualizamos las estadísticas usando las variables built-in de la estrategia
+total_wins   := strategy.wintrades
+total_losses := strategy.losstrades
+running_profit := strategy.grossprofit
+running_loss   := strategy.grossloss   // Nota: este valor es negativo, ya que representa pérdidas totales
+
+// Calcular el porcentaje de operaciones ganadoras, promedio de ganancia y promedio de pérdida
+float win_percentage = (total_wins + total_losses) > 0 ? total_wins * 100.0 / (total_wins + total_losses) : na
+float avg_profit = total_wins > 0 ? running_profit / total_wins : na
+// Se utiliza math.abs para obtener el valor absoluto de las pérdidas
+float avg_loss   = total_losses > 0 ? math.abs(running_loss) / total_losses : na
+float pnl = strategy.netprofit
+
+// Funciones para inicializar y actualizar la tabla
+init_table() =>
+    c_transparent = color.new(color.black, 100)
+    table.new(position.top_right, 2, 6, frame_color=c_transparent, frame_width=1, border_width=1, border_color=c_transparent)
+
+update_table(tbl, totalWins, totalLosses, winPercentage, avgProfit, avgLoss, pnl_val) =>
+    table.cell(tbl, 0, 0, "Winning Trades", bgcolor=color.gray, text_color=color.white)
+    table.cell(tbl, 1, 0, str.tostring(totalWins), bgcolor=color.green, text_color=color.white)
+    table.cell(tbl, 0, 1, "Losing Trades", bgcolor=color.gray, text_color=color.white)
+    table.cell(tbl, 1, 1, str.tostring(totalLosses), bgcolor=color.red, text_color=color.white)
+    table.cell(tbl, 0, 2, "% Profitable", bgcolor=color.gray, text_color=color.white)
+    table.cell(tbl, 1, 2, not na(winPercentage) ? str.tostring(winPercentage, "0") + "%" : "N/A", bgcolor=color.gray, text_color=color.white)
+    table.cell(tbl, 0, 3, "Avg Profit", bgcolor=color.gray, text_color=color.white)
+    table.cell(tbl, 1, 3, not na(avgProfit) ? str.tostring(avgProfit, "0.0") + " pts" : "N/A", bgcolor=color.green, text_color=color.white)
+    table.cell(tbl, 0, 4, "Avg Loss", bgcolor=color.gray, text_color=color.white)
+    table.cell(tbl, 1, 4, not na(avgLoss) ? str.tostring(avgLoss, "0.0") + " pts" : "N/A", bgcolor=color.red, text_color=color.white)
+    table.cell(tbl, 0, 5, "Current ATR", bgcolor=color.gray, text_color=color.white)
+    table.cell(tbl, 1, 5, str.tostring(Profit_ATR, "0.0") + " pts", bgcolor=color.gray, text_color=color.white)
+
+// Inicialización y actualización de la tabla
+var tbl_stats = init_table()
+update_table(tbl_stats, total_wins, total_losses, win_percentage, avg_profit, avg_loss, pnl)
